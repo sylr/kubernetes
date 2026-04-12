@@ -17,6 +17,7 @@ limitations under the License.
 package diff
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -90,6 +91,78 @@ const (
 	sensitiveMaskBefore  = "*** (before)"
 	sensitiveMaskAfter   = "*** (after)"
 )
+
+// kustomizeHashSuffixRegex matches the kustomize hash suffix pattern.
+// Kustomize generates hashes by taking the first 10 hex characters of a SHA-256
+// digest and substituting: 0→g, 1→h, 3→k, a→m, e→t. The resulting character
+// set is [2456789bcdfghkmt].
+var kustomizeHashSuffixRegex = regexp.MustCompile(`^(.+)-([2456789bcdfghkmt]{10})$`)
+
+// isKustomizeHashSuffixedName checks if a resource name has a kustomize-style
+// hash suffix and returns the base name if found.
+func isKustomizeHashSuffixedName(name string) (baseName string, ok bool) {
+	matches := kustomizeHashSuffixRegex.FindStringSubmatch(name)
+	if matches == nil {
+		return "", false
+	}
+	return matches[1], true
+}
+
+// findPreviousHashSuffixedResource searches the cluster for a resource with the
+// same base name but a different kustomize hash suffix. This is used to find the
+// "previous version" of a kustomize-generated ConfigMap/Secret so that kubectl
+// diff can show a meaningful content diff instead of a full resource creation.
+func findPreviousHashSuffixedResource(
+	client dynamic.Interface,
+	info *resource.Info,
+	baseName string,
+) (runtime.Object, error) {
+	var list *unstructured.UnstructuredList
+	var err error
+	if info.Namespace != "" {
+		list, err = client.Resource(info.Mapping.Resource).
+			Namespace(info.Namespace).
+			List(context.TODO(), metav1.ListOptions{})
+	} else {
+		list, err = client.Resource(info.Mapping.Resource).
+			List(context.TODO(), metav1.ListOptions{})
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	prefix := baseName + "-"
+	for i := range list.Items {
+		item := &list.Items[i]
+		name := item.GetName()
+		if name == info.Name {
+			continue
+		}
+		if strings.HasPrefix(name, prefix) {
+			suffix := name[len(prefix):]
+			if len(suffix) == 10 && kustomizeHashSuffixRegex.MatchString(name) {
+				return item, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// kustomizeHashObject wraps an InfoObject to override Live() with a previously
+// found hash-suffixed resource. This allows the diff to show meaningful changes
+// between the old and new versions of a kustomize-generated resource, rather
+// than showing the new resource as a full creation.
+//
+// Merged() is inherited from InfoObject and still uses Info.Object (which is nil
+// for not-found resources), so it correctly takes the dry-run create path.
+type kustomizeHashObject struct {
+	InfoObject
+	oldLive runtime.Object
+}
+
+func (obj kustomizeHashObject) Live() runtime.Object {
+	return obj.oldLive
+}
 
 // diffError returns the ExitError if the status code is less than 1,
 // nil otherwise.
@@ -750,6 +823,8 @@ func (o *DiffOptions) Run() error {
 		return err
 	}
 
+	isKustomize := o.FilenameOptions.Kustomize != ""
+
 	err = r.Visit(func(info *resource.Info, err error) error {
 		if err != nil {
 			return err
@@ -757,11 +832,28 @@ func (o *DiffOptions) Run() error {
 
 		local := info.Object.DeepCopyObject()
 		for i := 1; i <= maxRetries; i++ {
+			var oldLive runtime.Object
 			if err = info.Get(); err != nil {
 				if !errors.IsNotFound(err) {
 					return err
 				}
 				info.Object = nil
+
+				// When using kustomize, ConfigMaps and Secrets generated with hash
+				// suffixes get a new name whenever their content changes. Try to find
+				// the previous version on the cluster so we can show a meaningful diff
+				// instead of displaying the entire resource as a new creation.
+				if isKustomize {
+					if baseName, ok := isKustomizeHashSuffixedName(info.Name); ok {
+						oldLive, _ = findPreviousHashSuffixedResource(
+							o.DynamicClient, info, baseName)
+						if oldLive != nil {
+							klog.V(4).Infof(
+								"Found previous kustomize hash-suffixed resource for %s (base name: %s)",
+								info.Name, baseName)
+						}
+					}
+				}
 			}
 
 			force := i == maxRetries
@@ -789,7 +881,15 @@ func (o *DiffOptions) Run() error {
 				o.tracker.MarkVisited(info)
 			}
 
-			err = differ.Diff(obj, printer, o.ShowManagedFields, o.ShowSecrets, o.ShowGeneration, o.ShowLabels, o.ShowAnnotations)
+			var diffObj Object = obj
+			if oldLive != nil {
+				diffObj = kustomizeHashObject{
+					InfoObject: obj,
+					oldLive:    oldLive,
+				}
+			}
+
+			err = differ.Diff(diffObj, printer, o.ShowManagedFields, o.ShowSecrets, o.ShowGeneration, o.ShowLabels, o.ShowAnnotations)
 			if !isConflict(err) {
 				break
 			}

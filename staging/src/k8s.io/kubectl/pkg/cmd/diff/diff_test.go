@@ -882,6 +882,166 @@ func TestMasker(t *testing.T) {
 	}
 }
 
+func TestIsKustomizeHashSuffixedName(t *testing.T) {
+	tests := []struct {
+		name         string
+		resourceName string
+		wantBase     string
+		wantOk       bool
+	}{
+		{
+			name:         "valid kustomize hash suffix",
+			resourceName: "traefik-static-2bk5m48bgk",
+			wantBase:     "traefik-static",
+			wantOk:       true,
+		},
+		{
+			name:         "valid hash with all allowed chars",
+			resourceName: "my-cm-245678bcdf",
+			wantBase:     "my-cm",
+			wantOk:       true,
+		},
+		{
+			name:         "no hash suffix",
+			resourceName: "traefik-static",
+			wantBase:     "",
+			wantOk:       false,
+		},
+		{
+			name:         "too short suffix",
+			resourceName: "my-cm-2bk5m",
+			wantBase:     "",
+			wantOk:       false,
+		},
+		{
+			name:         "suffix with invalid chars (uppercase)",
+			resourceName: "my-cm-2BK5M48BGK",
+			wantBase:     "",
+			wantOk:       false,
+		},
+		{
+			name:         "suffix with chars not in kustomize set",
+			resourceName: "my-cm-abcdefghij",
+			wantBase:     "",
+			wantOk:       false,
+		},
+		{
+			name:         "simple name with valid hash",
+			resourceName: "config-ghkmt24567",
+			wantBase:     "config",
+			wantOk:       true,
+		},
+		{
+			name:         "name that is only a hash (no base)",
+			resourceName: "2bk5m48bgk",
+			wantBase:     "",
+			wantOk:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, ok := isKustomizeHashSuffixedName(tt.resourceName)
+			if ok != tt.wantOk {
+				t.Errorf("isKustomizeHashSuffixedName(%q) ok = %v, want %v", tt.resourceName, ok, tt.wantOk)
+			}
+			if base != tt.wantBase {
+				t.Errorf("isKustomizeHashSuffixedName(%q) base = %q, want %q", tt.resourceName, base, tt.wantBase)
+			}
+		})
+	}
+}
+
+func TestKustomizeHashObjectLiveOverride(t *testing.T) {
+	oldLive := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]interface{}{
+			"name":      "my-config-oldh4sh999",
+			"namespace": "default",
+		},
+		"data": map[string]interface{}{
+			"key": "old-value",
+		},
+	}}
+
+	obj := kustomizeHashObject{
+		InfoObject: InfoObject{},
+		oldLive:    oldLive,
+	}
+
+	// Live() should return the old live object
+	live := obj.Live()
+	if live != oldLive {
+		t.Errorf("Live() should return oldLive, got %v", live)
+	}
+}
+
+func TestKustomizeHashDiffer(t *testing.T) {
+	diff, err := NewDiffer("LIVE", "MERGED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer diff.TearDown()
+
+	// Simulate a kustomize hash-suffixed ConfigMap where the content changed,
+	// so the old live version has a different hash than the new merged version.
+	obj := FakeObject{
+		name: "v1.ConfigMap.ingress.traefik-static-ghkmt24567",
+		live: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name":      "traefik-static-2bk5m48bgk",
+				"namespace": "ingress",
+			},
+			"data": map[string]interface{}{
+				"config.yaml": "old-content",
+			},
+		},
+		merged: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name":      "traefik-static-ghkmt24567",
+				"namespace": "ingress",
+			},
+			"data": map[string]interface{}{
+				"config.yaml": "new-content",
+			},
+		},
+	}
+
+	err = diff.Diff(&obj, Printer{}, false, false, true, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The LIVE side should contain the old content
+	fromContent, err := os.ReadFile(filepath.Join(diff.From.Dir.Name, obj.Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(fromContent), "old-content") {
+		t.Errorf("LIVE file should contain old-content, got: %s", string(fromContent))
+	}
+	if !strings.Contains(string(fromContent), "traefik-static-2bk5m48bgk") {
+		t.Errorf("LIVE file should contain old resource name, got: %s", string(fromContent))
+	}
+
+	// The MERGED side should contain the new content
+	toContent, err := os.ReadFile(filepath.Join(diff.To.Dir.Name, obj.Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(toContent), "new-content") {
+		t.Errorf("MERGED file should contain new-content, got: %s", string(toContent))
+	}
+	if !strings.Contains(string(toContent), "traefik-static-ghkmt24567") {
+		t.Errorf("MERGED file should contain new resource name, got: %s", string(toContent))
+	}
+}
+
 func TestShowSecrets(t *testing.T) {
 	diff, err := NewDiffer("LIVE", "MERGED")
 	if err != nil {
