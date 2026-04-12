@@ -109,6 +109,8 @@ type DiffOptions struct {
 	ShowManagedFields bool
 	ShowSecrets       bool
 	ShowGeneration    bool
+	ShowLabels        bool
+	ShowAnnotations   bool
 
 	Concurrency      int
 	Selector         string
@@ -173,6 +175,8 @@ func NewCmdDiff(f cmdutil.Factory, streams genericiooptions.IOStreams) *cobra.Co
 	cmd.Flags().BoolVar(&options.ShowManagedFields, "show-managed-fields", options.ShowManagedFields, "If true, include managed fields in the diff.")
 	cmd.Flags().BoolVar(&options.ShowSecrets, "show-secrets", false, "If true, do not mask secret values in the diff.")
 	cmd.Flags().BoolVar(&options.ShowGeneration, "show-generation", true, "If true, include the generation field in the diff.")
+	cmd.Flags().BoolVar(&options.ShowLabels, "show-labels", true, "If false, omit labels from the diff.")
+	cmd.Flags().BoolVar(&options.ShowAnnotations, "show-annotations", true, "If false, omit annotations from the diff.")
 	cmd.Flags().IntVar(&options.Concurrency, "concurrency", 1, "Number of objects to process in parallel when diffing against the live version. Larger number = faster, but more memory, I/O and CPU over that shorter period of time.")
 	cmdutil.AddFilenameOptionFlags(cmd, &options.FilenameOptions, usage)
 	cmdutil.AddServerSideApplyFlags(cmd)
@@ -567,7 +571,7 @@ func NewDiffer(from, to string) (*Differ, error) {
 }
 
 // Diff diffs to versions of a specific object, and print both versions to directories.
-func (d *Differ) Diff(obj Object, printer Printer, showManagedFields, showSecrets, showGeneration bool) error {
+func (d *Differ) Diff(obj Object, printer Printer, showManagedFields, showSecrets, showGeneration, showLabels, showAnnotations bool) error {
 	from, err := d.From.getObject(obj)
 	if err != nil {
 		return err
@@ -584,6 +588,14 @@ func (d *Differ) Diff(obj Object, printer Printer, showManagedFields, showSecret
 	if !showGeneration {
 		from = omitGenerationField(from)
 		to = omitGenerationField(to)
+	}
+	if !showLabels {
+		from = omitLabels(from)
+		to = omitLabels(to)
+	}
+	if !showAnnotations {
+		from = omitAnnotations(from)
+		to = omitAnnotations(to)
 	}
 
 	// Mask secret values if object is V1Secret
@@ -621,6 +633,24 @@ func omitGenerationField(o runtime.Object) runtime.Object {
 		return o
 	}
 	a.SetGeneration(0)
+	return o
+}
+
+func omitLabels(o runtime.Object) runtime.Object {
+	a, err := meta.Accessor(o)
+	if err != nil {
+		return o
+	}
+	a.SetLabels(nil)
+	return o
+}
+
+func omitAnnotations(o runtime.Object) runtime.Object {
+	a, err := meta.Accessor(o)
+	if err != nil {
+		return o
+	}
+	a.SetAnnotations(nil)
 	return o
 }
 
@@ -759,7 +789,7 @@ func (o *DiffOptions) Run() error {
 				o.tracker.MarkVisited(info)
 			}
 
-			err = differ.Diff(obj, printer, o.ShowManagedFields, o.ShowSecrets, o.ShowGeneration)
+			err = differ.Diff(obj, printer, o.ShowManagedFields, o.ShowSecrets, o.ShowGeneration, o.ShowLabels, o.ShowAnnotations)
 			if !isConflict(err) {
 				break
 			}

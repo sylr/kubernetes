@@ -197,7 +197,7 @@ func TestDiffer(t *testing.T) {
 		live:   map[string]interface{}{"live": true},
 		merged: map[string]interface{}{"merged": true},
 	}
-	err = diff.Diff(&obj, Printer{}, true, false, true)
+	err = diff.Diff(&obj, Printer{}, true, false, true, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ metadata:
 				},
 			}
 
-			err = diff.Diff(&obj, Printer{}, tc.showManagedFields, false, true)
+			err = diff.Diff(&obj, Printer{}, tc.showManagedFields, false, true, true, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -360,7 +360,177 @@ metadata:
 				},
 			}
 
-			err = diff.Diff(&obj, Printer{}, false, false, tc.showGeneration)
+			err = diff.Diff(&obj, Printer{}, false, false, tc.showGeneration, true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			actualFromContent, _ := os.ReadFile(filepath.Join(diff.From.Dir.Name, obj.Name()))
+			if string(actualFromContent) != tc.expectedFromContent {
+				t.Fatalf("File has %q, expected %q", string(actualFromContent), tc.expectedFromContent)
+			}
+
+			actualToContent, _ := os.ReadFile(filepath.Join(diff.To.Dir.Name, obj.Name()))
+			if string(actualToContent) != tc.expectedToContent {
+				t.Fatalf("File has %q, expected %q", string(actualToContent), tc.expectedToContent)
+			}
+		})
+	}
+}
+
+func TestShowLabels(t *testing.T) {
+	diff, err := NewDiffer("LIVE", "MERGED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer diff.TearDown()
+
+	testCases := []struct {
+		name                string
+		showLabels          bool
+		expectedFromContent string
+		expectedToContent   string
+	}{
+		{
+			name:       "without labels",
+			showLabels: false,
+			expectedFromContent: `live: true
+metadata:
+  name: foo
+`,
+			expectedToContent: `merged: true
+metadata:
+  name: foo
+`,
+		},
+		{
+			name:       "with labels",
+			showLabels: true,
+			expectedFromContent: `live: true
+metadata:
+  labels:
+    app: bar
+  name: foo
+`,
+			expectedToContent: `merged: true
+metadata:
+  labels:
+    app: bar
+  name: foo
+`,
+		},
+	}
+
+	for i, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := FakeObject{
+				name: fmt.Sprintf("TestCase%d", i),
+				live: map[string]interface{}{
+					"live": true,
+					"metadata": map[string]interface{}{
+						"labels": map[string]interface{}{
+							"app": "bar",
+						},
+						"name": "foo",
+					},
+				},
+				merged: map[string]interface{}{
+					"merged": true,
+					"metadata": map[string]interface{}{
+						"labels": map[string]interface{}{
+							"app": "bar",
+						},
+						"name": "foo",
+					},
+				},
+			}
+
+			err = diff.Diff(&obj, Printer{}, true, false, true, tc.showLabels, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			actualFromContent, _ := os.ReadFile(filepath.Join(diff.From.Dir.Name, obj.Name()))
+			if string(actualFromContent) != tc.expectedFromContent {
+				t.Fatalf("File has %q, expected %q", string(actualFromContent), tc.expectedFromContent)
+			}
+
+			actualToContent, _ := os.ReadFile(filepath.Join(diff.To.Dir.Name, obj.Name()))
+			if string(actualToContent) != tc.expectedToContent {
+				t.Fatalf("File has %q, expected %q", string(actualToContent), tc.expectedToContent)
+			}
+		})
+	}
+}
+
+func TestShowAnnotations(t *testing.T) {
+	diff, err := NewDiffer("LIVE", "MERGED")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer diff.TearDown()
+
+	testCases := []struct {
+		name                string
+		showAnnotations     bool
+		expectedFromContent string
+		expectedToContent   string
+	}{
+		{
+			name:            "without annotations",
+			showAnnotations: false,
+			expectedFromContent: `live: true
+metadata:
+  name: foo
+`,
+			expectedToContent: `merged: true
+metadata:
+  name: foo
+`,
+		},
+		{
+			name:            "with annotations",
+			showAnnotations: true,
+			expectedFromContent: `live: true
+metadata:
+  annotations:
+    note: baz
+  name: foo
+`,
+			expectedToContent: `merged: true
+metadata:
+  annotations:
+    note: baz
+  name: foo
+`,
+		},
+	}
+
+	for i, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := FakeObject{
+				name: fmt.Sprintf("TestCase%d", i),
+				live: map[string]interface{}{
+					"live": true,
+					"metadata": map[string]interface{}{
+						"annotations": map[string]interface{}{
+							"note": "baz",
+						},
+						"name": "foo",
+					},
+				},
+				merged: map[string]interface{}{
+					"merged": true,
+					"metadata": map[string]interface{}{
+						"annotations": map[string]interface{}{
+							"note": "baz",
+						},
+						"name": "foo",
+					},
+				},
+			}
+
+			err = diff.Diff(&obj, Printer{}, true, false, true, true, tc.showAnnotations)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -782,7 +952,7 @@ metadata:
 				merged: secretArgs,
 			}
 
-			err = diff.Diff(&obj, Printer{}, false, tc.showSecrets, true)
+			err = diff.Diff(&obj, Printer{}, false, tc.showSecrets, true, true, true)
 			if err != nil {
 				t.Fatal(err)
 			}
