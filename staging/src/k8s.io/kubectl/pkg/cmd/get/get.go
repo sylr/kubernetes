@@ -81,6 +81,11 @@ type GetOptions struct {
 	NoHeaders      bool
 	IgnoreNotFound bool
 
+	// nodeZones holds a mapping of node name to topology zone, populated
+	// when pods are requested with wide output so that a "Zone" column
+	// can be appended to the table.
+	nodeZones map[string]string
+
 	genericiooptions.IOStreams
 }
 
@@ -264,7 +269,11 @@ func (o *GetOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []stri
 			printer = &skipPrinter{delegate: printer, output: outputObjects}
 		}
 		if o.ServerPrint {
-			printer = &TablePrinter{Delegate: printer}
+			delegate := printer
+			if o.nodeZones != nil {
+				delegate = &TopologyEnricher{Delegate: delegate, NodeZones: o.nodeZones}
+			}
+			printer = &TablePrinter{Delegate: delegate}
 		}
 		return printer.PrintObj, nil
 	}
@@ -492,6 +501,19 @@ func (o *GetOptions) Run(f cmdutil.Factory, args []string) error {
 		allErrs = append(allErrs, err)
 	}
 	printWithKind := multipleGVKsRequested(infos)
+
+	// When wide output is requested and we're getting pods, fetch node
+	// topology zones so we can enrich the table with a "Zone" column.
+	if o.PrintFlags.OutputFormat != nil && *o.PrintFlags.OutputFormat == "wide" {
+		for _, info := range infos {
+			if info.Mapping != nil && info.Mapping.Resource.Resource == "pods" && info.Mapping.Resource.Group == "" {
+				if clientset, err := f.KubernetesClientSet(); err == nil {
+					o.nodeZones, _ = fetchNodeZones(clientset)
+				}
+				break
+			}
+		}
+	}
 
 	objs := make([]runtime.Object, len(infos))
 	for ix := range infos {
