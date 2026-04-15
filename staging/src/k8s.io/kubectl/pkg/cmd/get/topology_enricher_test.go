@@ -18,6 +18,7 @@ package get
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"testing"
 
@@ -185,6 +186,130 @@ func TestTopologyEnricher(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func mustMarshalOwnerRefs(ownerName string) runtime.RawExtension {
+	obj := map[string]any{
+		"metadata": map[string]any{
+			"ownerReferences": []map[string]any{
+				{"name": ownerName},
+			},
+		},
+	}
+	raw, _ := json.Marshal(obj)
+	return runtime.RawExtension{Raw: raw}
+}
+
+func TestTopologyEnricherSorting(t *testing.T) {
+	var buf bytes.Buffer
+	var captured *metav1.Table
+
+	delegate := printers.ResourcePrinterFunc(func(obj runtime.Object, w io.Writer) error {
+		captured = obj.(*metav1.Table)
+		return nil
+	})
+
+	enricher := &TopologyEnricher{
+		Delegate: delegate,
+		NodeZones: map[string]string{
+			"node-1": "us-east-1b",
+			"node-2": "us-east-1a",
+			"node-3": "us-east-1a",
+		},
+	}
+
+	table := &metav1.Table{
+		ColumnDefinitions: []metav1.TableColumnDefinition{
+			{Name: "Name", Type: "string"},
+			{Name: "Node", Type: "string", Priority: 1},
+		},
+		Rows: []metav1.TableRow{
+			// owner-b, zone us-east-1b
+			{Cells: []any{"pod-z", "node-1"}, Object: mustMarshalOwnerRefs("deploy-b")},
+			// owner-a, zone us-east-1a
+			{Cells: []any{"pod-b", "node-2"}, Object: mustMarshalOwnerRefs("deploy-a")},
+			// owner-a, zone us-east-1a
+			{Cells: []any{"pod-a", "node-3"}, Object: mustMarshalOwnerRefs("deploy-a")},
+			// owner-a, zone us-east-1b
+			{Cells: []any{"pod-c", "node-1"}, Object: mustMarshalOwnerRefs("deploy-a")},
+			// owner-b, zone us-east-1a
+			{Cells: []any{"pod-d", "node-2"}, Object: mustMarshalOwnerRefs("deploy-b")},
+		},
+	}
+
+	if err := enricher.PrintObj(table, &buf); err != nil {
+		t.Fatalf("PrintObj returned error: %v", err)
+	}
+
+	// Expected order: deploy-a/us-east-1a/pod-a, deploy-a/us-east-1a/pod-b,
+	// deploy-a/us-east-1b/pod-c, deploy-b/us-east-1a/pod-d, deploy-b/us-east-1b/pod-z
+	wantNames := []string{"pod-a", "pod-b", "pod-c", "pod-d", "pod-z"}
+	if len(captured.Rows) != len(wantNames) {
+		t.Fatalf("expected %d rows, got %d", len(wantNames), len(captured.Rows))
+	}
+	for i, want := range wantNames {
+		got, _ := captured.Rows[i].Cells[0].(string)
+		if got != want {
+			t.Errorf("row %d: expected pod name %q, got %q", i, want, got)
+		}
+	}
+}
+
+func TestTopologyEnricherSortingEdgeCases(t *testing.T) {
+	var buf bytes.Buffer
+	var captured *metav1.Table
+
+	delegate := printers.ResourcePrinterFunc(func(obj runtime.Object, w io.Writer) error {
+		captured = obj.(*metav1.Table)
+		return nil
+	})
+
+	enricher := &TopologyEnricher{
+		Delegate: delegate,
+		NodeZones: map[string]string{
+			"node-1": "us-east-1a",
+			"node-2": "us-east-1b",
+		},
+	}
+
+	// Mix of: no Object.Raw, no ownerReferences, normal owner ref
+	noRaw := runtime.RawExtension{}
+	noOwner := func() runtime.RawExtension {
+		raw, _ := json.Marshal(map[string]any{"metadata": map[string]any{}})
+		return runtime.RawExtension{Raw: raw}
+	}
+
+	table := &metav1.Table{
+		ColumnDefinitions: []metav1.TableColumnDefinition{
+			{Name: "Name", Type: "string"},
+			{Name: "Node", Type: "string", Priority: 1},
+		},
+		Rows: []metav1.TableRow{
+			{Cells: []any{"owned-pod", "node-2"}, Object: mustMarshalOwnerRefs("deploy-a")},
+			{Cells: []any{"orphan-b", "node-1"}, Object: noOwner()},
+			{Cells: []any{"no-raw", "node-2"}, Object: noRaw},
+			{Cells: []any{"orphan-a", "node-2"}, Object: noOwner()},
+		},
+	}
+
+	if err := enricher.PrintObj(table, &buf); err != nil {
+		t.Fatalf("PrintObj returned error: %v", err)
+	}
+
+	// Empty owner (no-raw, orphan-a, orphan-b) sorts before "deploy-a",
+	// then within empty-owner group: sorted by zone then name.
+	// no-raw → node-2 → us-east-1b, orphan-a → node-2 → us-east-1b, orphan-b → node-1 → us-east-1a
+	// So: orphan-b (1a), no-raw (1b), orphan-a (1b), then owned-pod (deploy-a, 1b)
+	wantNames := []string{"orphan-b", "no-raw", "orphan-a", "owned-pod"}
+	if len(captured.Rows) != len(wantNames) {
+		t.Fatalf("expected %d rows, got %d", len(wantNames), len(captured.Rows))
+	}
+	for i, want := range wantNames {
+		got, _ := captured.Rows[i].Cells[0].(string)
+		if got != want {
+			t.Errorf("row %d: expected pod name %q, got %q", i, want, got)
+		}
 	}
 }
 

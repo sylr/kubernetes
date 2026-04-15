@@ -18,7 +18,9 @@ package get
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"sort"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -84,9 +86,86 @@ func (e *TopologyEnricher) PrintObj(obj runtime.Object, writer io.Writer) error 
 			newCells = append(newCells, row.Cells[insertIdx:]...)
 			row.Cells = newCells
 		}
+
+		// Sort rows by owner reference name, then zone, then pod name.
+		sortTableRows(table.Rows, insertIdx)
 	}
 
 	return e.Delegate.PrintObj(table, writer)
+}
+
+// sortTableRows sorts table rows by owner reference name, then by zone, then
+// by pod name (first cell). Owner references are extracted once per row to
+// avoid repeated JSON unmarshaling inside the comparator.
+func sortTableRows(rows []metav1.TableRow, zoneColIdx int) {
+	n := len(rows)
+	owners := make([]string, n)
+	for i := range rows {
+		owners[i] = ownerRefName(rows[i])
+	}
+
+	// Sort an index slice so the cached owners stay aligned with rows.
+	indices := make([]int, n)
+	for i := range indices {
+		indices[i] = i
+	}
+
+	sort.SliceStable(indices, func(i, j int) bool {
+		ii, jj := indices[i], indices[j]
+		if owners[ii] != owners[jj] {
+			return owners[ii] < owners[jj]
+		}
+
+		zoneI := cellString(rows[ii].Cells, zoneColIdx)
+		zoneJ := cellString(rows[jj].Cells, zoneColIdx)
+		if zoneI != zoneJ {
+			return zoneI < zoneJ
+		}
+
+		nameI := cellString(rows[ii].Cells, 0)
+		nameJ := cellString(rows[jj].Cells, 0)
+		return nameI < nameJ
+	})
+
+	sorted := make([]metav1.TableRow, n)
+	for i, idx := range indices {
+		sorted[i] = rows[idx]
+	}
+	copy(rows, sorted)
+}
+
+// ownerRefName extracts the first owner reference name from a table row's
+// embedded object metadata.
+func ownerRefName(row metav1.TableRow) string {
+	if row.Object.Raw == nil {
+		return ""
+	}
+	var obj struct {
+		Metadata struct {
+			OwnerReferences []struct {
+				Name string `json:"name"`
+			} `json:"ownerReferences"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(row.Object.Raw, &obj); err != nil {
+		return ""
+	}
+	if len(obj.Metadata.OwnerReferences) > 0 {
+		return obj.Metadata.OwnerReferences[0].Name
+	}
+	return ""
+}
+
+// cellString returns the string value of a cell at the given index, or empty
+// string if out of bounds or not a string.
+func cellString(cells []interface{}, idx int) string {
+	if idx < 0 || idx >= len(cells) {
+		return ""
+	}
+	if s, ok := cells[idx].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // fetchNodeZones fetches all nodes and returns a map of node name to topology zone.
