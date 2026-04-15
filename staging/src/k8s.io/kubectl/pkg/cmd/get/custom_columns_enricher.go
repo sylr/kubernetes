@@ -17,6 +17,7 @@ limitations under the License.
 package get
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/printers"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/client-go/util/jsonpath"
 )
 
 const customColumnsExtensionKey = "kubectl.kubernetes.io/custom-columns"
@@ -37,8 +39,11 @@ type CustomColumnSpec struct {
 	Name string `json:"name"`
 	// Label is the label key to extract. Mutually exclusive with Annotation.
 	Label string `json:"label,omitempty"`
-	// Annotation is the annotation key to extract. Mutually exclusive with Label.
+	// Annotation is the annotation key to extract. Mutually exclusive with Label and JSONPath.
 	Annotation string `json:"annotation,omitempty"`
+	// JSONPath is a jsonpath expression to evaluate against the row's embedded object.
+	// Mutually exclusive with Label and Annotation. Requires full object inclusion.
+	JSONPath string `json:"jsonpath,omitempty"`
 	// OmitEmpty prints an empty string instead of "<none>" when the value is missing.
 	OmitEmpty bool `json:"omitEmpty,omitempty"`
 }
@@ -71,16 +76,44 @@ func (e *CustomColumnsEnricher) PrintObj(obj runtime.Object, writer io.Writer) e
 		})
 	}
 
-	// Append custom cell values to each row
+	// Pre-parse any jsonpath expressions, warning on invalid ones.
+	hasJSONPath := false
+	parsers := make([]*jsonpath.JSONPath, len(e.Columns))
+	for i, col := range e.Columns {
+		if col.JSONPath != "" {
+			expr, err := RelaxedJSONPathExpression(col.JSONPath)
+			if err != nil {
+				fmt.Fprintf(writer, "warning: invalid jsonpath %q for column %q: %v\n", col.JSONPath, col.Name, err)
+				continue
+			}
+			p := jsonpath.New(col.Name).AllowMissingKeys(true)
+			if err := p.Parse(expr); err != nil {
+				fmt.Fprintf(writer, "warning: invalid jsonpath %q for column %q: %v\n", col.JSONPath, col.Name, err)
+				continue
+			}
+			parsers[i] = p
+			hasJSONPath = true
+		}
+	}
+
+	// Append custom cell values to each row.
+	// When jsonpath columns exist, unmarshal the row object once and reuse it.
 	for i := range table.Rows {
 		row := &table.Rows[i]
 		meta := rowMetadata(row)
-		for _, col := range e.Columns {
+		var rowObj interface{}
+		if hasJSONPath && row.Object.Raw != nil {
+			json.Unmarshal(row.Object.Raw, &rowObj)
+		}
+		for j, col := range e.Columns {
 			var val string
-			if col.Label != "" {
+			switch {
+			case col.Label != "":
 				val = meta.Labels[col.Label]
-			} else if col.Annotation != "" {
+			case col.Annotation != "":
 				val = meta.Annotations[col.Annotation]
+			case parsers[j] != nil && rowObj != nil:
+				val = evalJSONPathObj(parsers[j], rowObj)
 			}
 			if val == "" && !col.OmitEmpty {
 				val = "<none>"
@@ -96,7 +129,31 @@ func (c *CustomColumnSpec) source() string {
 	if c.Label != "" {
 		return "label:" + c.Label
 	}
-	return "annotation:" + c.Annotation
+	if c.Annotation != "" {
+		return "annotation:" + c.Annotation
+	}
+	return "jsonpath:" + c.JSONPath
+}
+
+// evalJSONPathObj evaluates a pre-parsed jsonpath expression against a
+// pre-unmarshaled object and returns the result as a string.
+func evalJSONPathObj(parser *jsonpath.JSONPath, obj interface{}) string {
+	var buf bytes.Buffer
+	if err := parser.Execute(&buf, obj); err != nil {
+		return ""
+	}
+	return buf.String()
+}
+
+// HasJSONPathColumns returns true if any of the given columns use jsonpath expressions.
+// If resource is non-empty, only columns matching that resource are considered.
+func HasJSONPathColumns(columns []CustomColumnSpec, resource string) bool {
+	for _, col := range columns {
+		if col.JSONPath != "" && (resource == "" || col.Resource == resource) {
+			return true
+		}
+	}
+	return false
 }
 
 // rowMetadataResult holds extracted labels and annotations from a row's embedded object.
@@ -156,7 +213,7 @@ func loadCustomColumns(loader interface{ RawConfig() (clientcmdapi.Config, error
 
 	var matched []CustomColumnSpec
 	for _, col := range parsed.Columns {
-		if col.Resource == resource && col.Name != "" && (col.Label != "" || col.Annotation != "") {
+		if col.Resource == resource && col.Name != "" && (col.Label != "" || col.Annotation != "" || col.JSONPath != "") {
 			matched = append(matched, col)
 		}
 	}

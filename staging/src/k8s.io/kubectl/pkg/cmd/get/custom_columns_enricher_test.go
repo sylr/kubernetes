@@ -188,3 +188,105 @@ func TestCustomColumnsEnricherNilRaw(t *testing.T) {
 		t.Errorf("expected %q, got %q", "<none>", zone)
 	}
 }
+
+func mustMarshalFullObject(obj map[string]any) runtime.RawExtension {
+	raw, _ := json.Marshal(obj)
+	return runtime.RawExtension{Raw: raw}
+}
+
+func TestCustomColumnsEnricherJSONPath(t *testing.T) {
+	var buf bytes.Buffer
+	var captured *metav1.Table
+
+	delegate := printers.ResourcePrinterFunc(func(obj runtime.Object, w io.Writer) error {
+		captured = obj.(*metav1.Table)
+		return nil
+	})
+
+	enricher := &CustomColumnsEnricher{
+		Delegate: delegate,
+		Columns: []CustomColumnSpec{
+			{Resource: "pods", Name: "Node", JSONPath: ".spec.nodeName"},
+			{Resource: "pods", Name: "IP", JSONPath: ".status.podIP"},
+			{Resource: "pods", Name: "Missing", JSONPath: ".spec.doesNotExist", OmitEmpty: true},
+		},
+	}
+
+	table := &metav1.Table{
+		ColumnDefinitions: []metav1.TableColumnDefinition{
+			{Name: "Name", Type: "string"},
+		},
+		Rows: []metav1.TableRow{
+			{
+				Cells: []any{"pod-1"},
+				Object: mustMarshalFullObject(map[string]any{
+					"spec":   map[string]any{"nodeName": "node-a"},
+					"status": map[string]any{"podIP": "10.0.0.1"},
+				}),
+			},
+			{
+				Cells: []any{"pod-2"},
+				Object: mustMarshalFullObject(map[string]any{
+					"spec":   map[string]any{"nodeName": "node-b"},
+					"status": map[string]any{},
+				}),
+			},
+			{
+				Cells:  []any{"pod-3"},
+				Object: runtime.RawExtension{}, // nil Raw
+			},
+		},
+	}
+
+	if err := enricher.PrintObj(table, &buf); err != nil {
+		t.Fatalf("PrintObj returned error: %v", err)
+	}
+
+	// Check columns
+	wantCols := []string{"Name", "Node", "IP", "Missing"}
+	if len(captured.ColumnDefinitions) != len(wantCols) {
+		t.Fatalf("expected %d columns, got %d", len(wantCols), len(captured.ColumnDefinitions))
+	}
+
+	// Check values
+	tests := []struct {
+		row              int
+		node, ip, missing string
+	}{
+		{0, "node-a", "10.0.0.1", ""},
+		{1, "node-b", "<none>", ""},
+		{2, "<none>", "<none>", ""},
+	}
+	for _, tt := range tests {
+		node, _ := captured.Rows[tt.row].Cells[1].(string)
+		ip, _ := captured.Rows[tt.row].Cells[2].(string)
+		missing, _ := captured.Rows[tt.row].Cells[3].(string)
+		if node != tt.node {
+			t.Errorf("row %d Node: expected %q, got %q", tt.row, tt.node, node)
+		}
+		if ip != tt.ip {
+			t.Errorf("row %d IP: expected %q, got %q", tt.row, tt.ip, ip)
+		}
+		if missing != tt.missing {
+			t.Errorf("row %d Missing: expected %q, got %q", tt.row, tt.missing, missing)
+		}
+	}
+}
+
+func TestHasJSONPathColumns(t *testing.T) {
+	if HasJSONPathColumns(nil, "") {
+		t.Error("nil columns should return false")
+	}
+	if HasJSONPathColumns([]CustomColumnSpec{{Label: "foo"}}, "") {
+		t.Error("label-only columns should return false")
+	}
+	if !HasJSONPathColumns([]CustomColumnSpec{{JSONPath: ".spec.nodeName"}}, "") {
+		t.Error("jsonpath column should return true")
+	}
+	if HasJSONPathColumns([]CustomColumnSpec{{Resource: "pods", JSONPath: ".spec.nodeName"}}, "nodes") {
+		t.Error("jsonpath column for different resource should return false")
+	}
+	if !HasJSONPathColumns([]CustomColumnSpec{{Resource: "pods", JSONPath: ".spec.nodeName"}}, "pods") {
+		t.Error("jsonpath column for matching resource should return true")
+	}
+}

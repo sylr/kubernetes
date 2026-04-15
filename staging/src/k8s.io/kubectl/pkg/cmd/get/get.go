@@ -478,8 +478,8 @@ func (o *GetOptions) transformRequests(req *rest.Request) {
 		"application/json",
 	}, ","))
 
-	// if sorting, ensure we receive the full object in order to introspect its fields via jsonpath
-	if len(o.SortBy) > 0 {
+	// if sorting or using jsonpath custom columns, ensure we receive the full object
+	if len(o.SortBy) > 0 || HasJSONPathColumns(o.customColumns, "") {
 		req.Param("includeObject", "Object")
 	}
 }
