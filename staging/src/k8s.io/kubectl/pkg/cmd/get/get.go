@@ -86,6 +86,10 @@ type GetOptions struct {
 	// can be appended to the table.
 	nodeZones map[string]string
 
+	// customColumns holds per-resource custom column specs loaded from the
+	// kubeconfig context extension "kubectl.kubernetes.io/custom-columns".
+	customColumns []CustomColumnSpec
+
 	genericiooptions.IOStreams
 }
 
@@ -239,6 +243,27 @@ func (o *GetOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []stri
 		o.IsHumanReadablePrinter = true
 	}
 
+	// Load custom column definitions from kubeconfig context extensions.
+	// These are resolved per-resource in ToPrinter using the mapping.
+	if o.IsHumanReadablePrinter {
+		if loader := f.ToRawKubeConfigLoader(); loader != nil {
+			if rawCfg, err := loader.RawConfig(); err == nil {
+				if ctx, ok := rawCfg.Contexts[rawCfg.CurrentContext]; ok && ctx != nil {
+					if ext, ok := ctx.Extensions[customColumnsExtensionKey]; ok && ext != nil {
+						if unknown, ok := ext.(*runtime.Unknown); ok && unknown != nil {
+							var parsed customColumnsExtension
+							if err := json.Unmarshal(unknown.Raw, &parsed); err == nil {
+								o.customColumns = parsed.Columns
+							} else {
+								fmt.Fprintf(o.ErrOut, "warning: failed to parse %s extension: %v\n", customColumnsExtensionKey, err)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	o.ToPrinter = func(mapping *meta.RESTMapping, outputObjects *bool, withNamespace bool, withKind bool) (printers.ResourcePrinterFunc, error) {
 		// make a new copy of current flags / opts before mutating
 		printFlags := o.PrintFlags.Copy()
@@ -272,6 +297,18 @@ func (o *GetOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []stri
 			delegate := printer
 			if o.nodeZones != nil {
 				delegate = &TopologyEnricher{Delegate: delegate, NodeZones: o.nodeZones}
+			}
+			if len(o.customColumns) > 0 && mapping != nil {
+				resource := mapping.Resource.Resource
+				var cols []CustomColumnSpec
+				for _, col := range o.customColumns {
+					if col.Resource == resource {
+						cols = append(cols, col)
+					}
+				}
+				if len(cols) > 0 {
+					delegate = &CustomColumnsEnricher{Delegate: delegate, Columns: cols}
+				}
 			}
 			printer = &TablePrinter{Delegate: delegate}
 		}
