@@ -313,6 +313,84 @@ func TestTopologyEnricherSortingEdgeCases(t *testing.T) {
 	}
 }
 
+func mustMarshalNodeWithZone(zone string) runtime.RawExtension {
+	obj := map[string]any{
+		"metadata": map[string]any{
+			"labels": map[string]any{
+				"topology.kubernetes.io/zone": zone,
+			},
+		},
+	}
+	raw, _ := json.Marshal(obj)
+	return runtime.RawExtension{Raw: raw}
+}
+
+func TestNodeTopologyEnricher(t *testing.T) {
+	var buf bytes.Buffer
+	var captured *metav1.Table
+
+	delegate := printers.ResourcePrinterFunc(func(obj runtime.Object, w io.Writer) error {
+		captured = obj.(*metav1.Table)
+		return nil
+	})
+
+	enricher := &NodeTopologyEnricher{Delegate: delegate}
+
+	noZone := func() runtime.RawExtension {
+		raw, _ := json.Marshal(map[string]any{"metadata": map[string]any{}})
+		return runtime.RawExtension{Raw: raw}
+	}
+
+	table := &metav1.Table{
+		ColumnDefinitions: []metav1.TableColumnDefinition{
+			{Name: "Name", Type: "string", Format: "name"},
+			{Name: "Status", Type: "string"},
+			{Name: "Roles", Type: "string"},
+			{Name: "Age", Type: "string"},
+			{Name: "Version", Type: "string"},
+		},
+		Rows: []metav1.TableRow{
+			{Cells: []any{"node-c", "Ready", "<none>", "10d", "v1.34.0"}, Object: mustMarshalNodeWithZone("eu-west-1b")},
+			{Cells: []any{"node-a", "Ready", "<none>", "10d", "v1.34.0"}, Object: mustMarshalNodeWithZone("eu-west-1a")},
+			{Cells: []any{"node-d", "Ready", "<none>", "10d", "v1.34.0"}, Object: noZone()},
+			{Cells: []any{"node-b", "Ready", "<none>", "10d", "v1.34.0"}, Object: mustMarshalNodeWithZone("eu-west-1a")},
+		},
+	}
+
+	if err := enricher.PrintObj(table, &buf); err != nil {
+		t.Fatalf("PrintObj returned error: %v", err)
+	}
+
+	// Check Zone column was added after Version
+	wantCols := []string{"Name", "Status", "Roles", "Age", "Version", "Zone"}
+	if len(captured.ColumnDefinitions) != len(wantCols) {
+		t.Fatalf("expected %d columns, got %d", len(wantCols), len(captured.ColumnDefinitions))
+	}
+	for i, want := range wantCols {
+		if captured.ColumnDefinitions[i].Name != want {
+			t.Errorf("column %d: expected %q, got %q", i, want, captured.ColumnDefinitions[i].Name)
+		}
+	}
+
+	// Expected sort: no-zone first (empty string), then eu-west-1a (a, b), then eu-west-1b (c)
+	wantNames := []string{"node-d", "node-a", "node-b", "node-c"}
+	wantZones := []string{"<none>", "eu-west-1a", "eu-west-1a", "eu-west-1b"}
+	if len(captured.Rows) != len(wantNames) {
+		t.Fatalf("expected %d rows, got %d", len(wantNames), len(captured.Rows))
+	}
+	zoneIdx := 5 // after Version
+	for i := range wantNames {
+		gotName, _ := captured.Rows[i].Cells[0].(string)
+		gotZone, _ := captured.Rows[i].Cells[zoneIdx].(string)
+		if gotName != wantNames[i] {
+			t.Errorf("row %d: expected name %q, got %q", i, wantNames[i], gotName)
+		}
+		if gotZone != wantZones[i] {
+			t.Errorf("row %d: expected zone %q, got %q", i, wantZones[i], gotZone)
+		}
+	}
+}
+
 func TestTopologyEnricherNonTable(t *testing.T) {
 	var buf bytes.Buffer
 	var called bool
