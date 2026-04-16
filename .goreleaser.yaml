@@ -125,20 +125,6 @@ homebrew_casks:
   - kubectl-cask
   binaries:
   - kubectl
-  # cobra already invokes the `completion` subcommand; extra args produced
-  # `kubectl completion completion <shell>` and broke install-time generation.
-  #
-  # Must match the kubectl-cask archive artifact basename (see archives kubectl-cask
-  # name_template). Homebrew runs this before linking to /opt/homebrew/bin, so `kubectl`
-  # is not on PATH yet — a bare executable name would exit 127.
-  generate_completions_from_executable:
-    executable: kubectl-v{{ .Version }}-darwin-arm64
-    shell_parameter_format: cobra
-    base_name: kubectl
-    shells:
-    - bash
-    - zsh
-    - fish
   caveats: |
     If you have Homebrew's kubernetes-cli formula installed, uninstall or unlink it
     first so this cask can install /opt/homebrew/bin/kubectl:
@@ -156,11 +142,46 @@ homebrew_casks:
     owner: sylr
     name: homebrew-tap
   hooks:
-    # preflight runs before `generate_completions_from_executable` and `binary` (see Homebrew
-    # Cask::Installer#install). Postflight xattr was too late: exec of the quarantined binary
-    # for completions is SIGKILL'd by macOS before quarantine could be stripped.
-    pre:
+    # postflight runs after the binary artifact is staged (see Cask::Installer). Strip quarantine,
+    # then run the same completion flow as `generate_completions_from_executable` (:cobra) so we
+    # never exec the quarantined binary during earlier artifact phases (SIGKILL / sort-order ties).
+    post:
       install: |
         if OS.mac?
           system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}"]
+          kubectl = staged_path.glob("kubectl-*darwin-arm64").first
+          kubectl ||= staged_path/"kubectl"
+          raise "kubectl binary not found in #{staged_path}" unless kubectl.exist?
+
+          executable = kubectl.to_s
+          %i[bash zsh fish].each do |shell|
+            env = { "SHELL" => shell.to_s }
+            param = ::Utils::ShellCompletion.completion_shell_parameter(:cobra, shell, executable, env)
+            out = ::Utils::ShellCompletion.generate_completion_output([executable], param, env)
+            path = case shell
+            when :bash
+              ::Cask::Artifact::BashCompletion.new(cask, "kubectl").resolve_target("kubectl")
+            when :zsh
+              ::Cask::Artifact::ZshCompletion.new(cask, "kubectl").resolve_target("kubectl")
+            when :fish
+              ::Cask::Artifact::FishCompletion.new(cask, "kubectl").resolve_target("kubectl")
+            end
+            path.dirname.mkpath
+            path.write(out)
+          end
+        end
+    pre:
+      uninstall: |
+        if OS.mac?
+          %i[bash zsh fish].each do |shell|
+            path = case shell
+            when :bash
+              ::Cask::Artifact::BashCompletion.new(cask, "kubectl").resolve_target("kubectl")
+            when :zsh
+              ::Cask::Artifact::ZshCompletion.new(cask, "kubectl").resolve_target("kubectl")
+            when :fish
+              ::Cask::Artifact::FishCompletion.new(cask, "kubectl").resolve_target("kubectl")
+            end
+            ::Utils.gain_permissions_remove(path) if path.exist?
+          end
         end
