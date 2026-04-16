@@ -127,7 +127,12 @@ homebrew_casks:
   - kubectl
   # cobra already invokes the `completion` subcommand; extra args produced
   # `kubectl completion completion <shell>` and broke install-time generation.
+  #
+  # Must match the kubectl-cask archive artifact basename (see archives kubectl-cask
+  # name_template). Homebrew runs this before linking to /opt/homebrew/bin, so `kubectl`
+  # is not on PATH yet — a bare executable name would exit 127.
   generate_completions_from_executable:
+    executable: kubectl-v{{ .Version }}-darwin-arm64
     shell_parameter_format: cobra
     base_name: kubectl
     shells:
