@@ -72,15 +72,9 @@ builds:
   - CGO_ENABLED=0
   targets:
   - darwin_arm64
-  binary: >-
-    kubectl-{{ .Version }}-{{ .Os }}-{{ .Arch }}
-    {{- if .Arm }}
-      {{- .Arm }}
-    {{- else if and .Arm64 (ne .Arm64 "v8.0") }}
-      {{- .Arm64 }}
-    {{- else if and .Amd64 (ne .Amd64 "v1") }}
-      {{- .Amd64 }}
-    {{- end }}
+  # Plain name so the Homebrew cask installs /opt/homebrew/bin/kubectl (see homebrew_casks.binaries).
+  # The main kubectl build keeps versioned filenames for multi-arch GitHub release assets.
+  binary: kubectl
   no_unique_dist_dir: true
 
 archives:
