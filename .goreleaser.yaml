@@ -125,15 +125,22 @@ homebrew_casks:
   - kubectl-cask
   binaries:
   - kubectl
+  # cobra already invokes the `completion` subcommand; extra args produced
+  # `kubectl completion completion <shell>` and broke install-time generation.
   generate_completions_from_executable:
-    args:
-    - completion
     shell_parameter_format: cobra
     base_name: kubectl
     shells:
     - bash
     - zsh
     - fish
+  caveats: |
+    If you have Homebrew's kubernetes-cli formula installed, uninstall or unlink it
+    first so this cask can install /opt/homebrew/bin/kubectl:
+
+      brew uninstall kubernetes-cli
+
+    (Linking is skipped when that path is already owned by the formula.)
   commit_msg_template: Brew cask update for {{ .ProjectName }} version {{ .Tag }}
   directory: Casks
   homepage: https://github.com/sylr/kubernetes
