@@ -156,7 +156,10 @@ homebrew_casks:
     owner: sylr
     name: homebrew-tap
   hooks:
-    post:
+    # preflight runs before `generate_completions_from_executable` and `binary` (see Homebrew
+    # Cask::Installer#install). Postflight xattr was too late: exec of the quarantined binary
+    # for completions is SIGKILL'd by macOS before quarantine could be stripped.
+    pre:
       install: |
         if OS.mac?
           system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}"]
