@@ -182,15 +182,30 @@ func rowMetadata(row *metav1.TableRow) rowMetadataResult {
 	}
 }
 
-// loadCustomColumns reads custom column specs from the active kubeconfig
+// effectiveContextName returns the context name that custom column lookups
+// should use. It honors an explicit --context override when set, falling back
+// to the kubeconfig's current-context only when no override is provided.
+//
+// RawConfig().CurrentContext reflects only the file's current-context field and
+// ignores the --context flag, so resolving the override here keeps custom
+// columns tied to the context the command actually targets.
+func effectiveContextName(cfg clientcmdapi.Config, override string) string {
+	if override != "" {
+		return override
+	}
+	return cfg.CurrentContext
+}
+
+// loadCustomColumns reads custom column specs from the targeted kubeconfig
 // context extension and returns those matching the given resource name.
-func loadCustomColumns(loader interface{ RawConfig() (clientcmdapi.Config, error) }, resource string) []CustomColumnSpec {
+// contextOverride is the value of the --context flag (empty when unset).
+func loadCustomColumns(loader interface{ RawConfig() (clientcmdapi.Config, error) }, contextOverride, resource string) []CustomColumnSpec {
 	rawConfig, err := loader.RawConfig()
 	if err != nil {
 		return nil
 	}
 
-	ctx, ok := rawConfig.Contexts[rawConfig.CurrentContext]
+	ctx, ok := rawConfig.Contexts[effectiveContextName(rawConfig, contextOverride)]
 	if !ok || ctx == nil {
 		return nil
 	}

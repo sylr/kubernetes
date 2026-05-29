@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/printers"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 func mustMarshalMetadata(labels, annotations map[string]string) runtime.RawExtension {
@@ -288,5 +289,60 @@ func TestHasJSONPathColumns(t *testing.T) {
 	}
 	if !HasJSONPathColumns([]CustomColumnSpec{{Resource: "pods", JSONPath: ".spec.nodeName"}}, "pods") {
 		t.Error("jsonpath column for matching resource should return true")
+	}
+}
+
+func TestEffectiveContextName(t *testing.T) {
+	cfg := clientcmdapi.Config{CurrentContext: "current"}
+	if got := effectiveContextName(cfg, ""); got != "current" {
+		t.Errorf("no override: expected current-context %q, got %q", "current", got)
+	}
+	if got := effectiveContextName(cfg, "flag-ctx"); got != "flag-ctx" {
+		t.Errorf("override: expected --context %q to win, got %q", "flag-ctx", got)
+	}
+}
+
+// fakeRawConfigLoader satisfies the loader interface accepted by
+// loadCustomColumns.
+type fakeRawConfigLoader struct {
+	cfg clientcmdapi.Config
+}
+
+func (f fakeRawConfigLoader) RawConfig() (clientcmdapi.Config, error) { return f.cfg, nil }
+
+// contextWithColumns builds a context whose custom-columns extension exposes a
+// single nodes column carrying the given label, stored exactly as clientcmd
+// deserializes kubeconfig extensions (a *runtime.Unknown holding raw JSON).
+func contextWithColumns(label string) *clientcmdapi.Context {
+	raw, _ := json.Marshal(customColumnsExtension{Columns: []CustomColumnSpec{
+		{Resource: "nodes", Name: label, Label: label},
+	}})
+	return &clientcmdapi.Context{
+		Extensions: map[string]runtime.Object{
+			customColumnsExtensionKey: &runtime.Unknown{Raw: raw},
+		},
+	}
+}
+
+func TestLoadCustomColumnsHonorsContextOverride(t *testing.T) {
+	loader := fakeRawConfigLoader{cfg: clientcmdapi.Config{
+		CurrentContext: "current",
+		Contexts: map[string]*clientcmdapi.Context{
+			"current":  contextWithColumns("from-current-context"),
+			"flag-ctx": contextWithColumns("from-flag-context"),
+		},
+	}}
+
+	// No override: columns come from the file's current-context.
+	cols := loadCustomColumns(loader, "", "nodes")
+	if len(cols) != 1 || cols[0].Label != "from-current-context" {
+		t.Fatalf("no override: expected current-context columns, got %+v", cols)
+	}
+
+	// --context override: columns must come from the targeted context, not
+	// current-context. This is the regression the override fix guards against.
+	cols = loadCustomColumns(loader, "flag-ctx", "nodes")
+	if len(cols) != 1 || cols[0].Label != "from-flag-context" {
+		t.Fatalf("override: expected --context columns, got %+v", cols)
 	}
 }

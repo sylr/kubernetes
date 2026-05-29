@@ -250,9 +250,17 @@ func (o *GetOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []stri
 	// Load custom column definitions from kubeconfig context extensions.
 	// These are resolved per-resource in ToPrinter using the mapping.
 	if o.IsHumanReadablePrinter {
+		// Honor the --context override: RawConfig().CurrentContext only
+		// reflects the file's current-context field, so without this custom
+		// columns would always load from current-context regardless of the
+		// context the command actually targets.
+		contextOverride := ""
+		if fl := cmd.Flags().Lookup("context"); fl != nil {
+			contextOverride = fl.Value.String()
+		}
 		if loader := f.ToRawKubeConfigLoader(); loader != nil {
 			if rawCfg, err := loader.RawConfig(); err == nil {
-				if ctx, ok := rawCfg.Contexts[rawCfg.CurrentContext]; ok && ctx != nil {
+				if ctx, ok := rawCfg.Contexts[effectiveContextName(rawCfg, contextOverride)]; ok && ctx != nil {
 					if ext, ok := ctx.Extensions[customColumnsExtensionKey]; ok && ext != nil {
 						if unknown, ok := ext.(*runtime.Unknown); ok && unknown != nil {
 							var parsed customColumnsExtension
